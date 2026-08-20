@@ -35,6 +35,8 @@ log = logging.getLogger("arks")
 BASE_DIR = Path(__file__).parent
 STATIC_DIR = BASE_DIR / "static"
 PAPERS_DIR = BASE_DIR / "papers"
+# How often a single block is re-asked before the page is called a failure.
+BLOCK_TRANSLATE_ATTEMPTS = 3
 
 app = FastAPI(title="Arks Translate", version="0.1.0")
 
@@ -111,6 +113,15 @@ def _is_part_of_speech_only(value: str) -> bool:
         "conjunction", "pronoun", "article", "numeral", "interjection",
     )
     return bool(compact) and all(part in "".join(pos_words) for part in re.findall(r"[a-z]+|[\u3400-\u9fff]+", compact))
+
+
+def _untranslated_blocks(blocks: list[dict], translations: list[str]) -> list[int]:
+    """Indexes of blocks that carry source text but still have no translation."""
+    return [
+        i
+        for i, block in enumerate(blocks)
+        if pdf_extract.needs_translation(block) and not (translations[i] if i < len(translations) else "").strip()
+    ]
 
 
 # ---- Static & root --------------------------------------------------------
@@ -267,9 +278,12 @@ async def _translate_page_events(paper_id: str, page_num: int, ai: ai_client.AIC
         # oversized batch so a long block cannot discard earlier results.
         zh_arr: list[str] = []
         batch_size = 4
-        pending = [(start, blocks[start : start + batch_size]) for start in range(0, len(blocks), batch_size)]
+        pending = [
+            (start, blocks[start : start + batch_size], 0)
+            for start in range(0, len(blocks), batch_size)
+        ]
         while pending:
-            start, batch = pending.pop(0)
+            start, batch, attempts = pending.pop(0)
             prompt = page_translate_prompt(batch)
             full: list[str] = []
             try:
@@ -282,8 +296,8 @@ async def _translate_page_events(paper_id: str, page_num: int, ai: ai_client.AIC
                 if "token limit" in str(e).lower() and len(batch) > 1:
                     midpoint = max(1, len(batch) // 2)
                     pending[0:0] = [
-                        (start, batch[:midpoint]),
-                        (start + midpoint, batch[midpoint:]),
+                        (start, batch[:midpoint], attempts),
+                        (start + midpoint, batch[midpoint:], attempts),
                     ]
                     log.warning(
                         "translate batch too long; splitting page=%s blocks=%s-%s into %s+%s",
@@ -300,6 +314,41 @@ async def _translate_page_events(paper_id: str, page_num: int, ai: ai_client.AIC
                 return
 
             batch_zh = parse_json_array("".join(full).strip(), len(batch))
+            gaps = [
+                start + i
+                for i, (block, zh) in enumerate(zip(batch, batch_zh))
+                if pdf_extract.needs_translation(block) and not zh.strip()
+            ]
+            if gaps:
+                # parse_json_array pads a short or unparsable reply with empty
+                # strings. Accepting them marks the page done with English
+                # blocks left in it, so retry before letting a gap through.
+                if len(batch) > 1:
+                    midpoint = max(1, len(batch) // 2)
+                    pending[0:0] = [
+                        (start, batch[:midpoint], attempts),
+                        (start + midpoint, batch[midpoint:], attempts),
+                    ]
+                    log.warning(
+                        "translate reply missing blocks %s on page %s; splitting batch",
+                        gaps,
+                        page_num,
+                    )
+                    continue
+                if attempts + 1 < BLOCK_TRANSLATE_ATTEMPTS:
+                    pending.insert(0, (start, batch, attempts + 1))
+                    log.warning("retrying block %s on page %s", start + 1, page_num)
+                    continue
+                log.error(
+                    "block %s on page %s still untranslated after %s attempts",
+                    start + 1,
+                    page_num,
+                    BLOCK_TRANSLATE_ATTEMPTS,
+                )
+                db.finish_page_translation(paper_id, page_num, "error")
+                yield {"type": "error", "message": f"Block {start + 1} could not be translated"}
+                return
+
             zh_arr.extend(batch_zh)
             for zh in batch_zh:
                 db.append_page_translation_block(paper_id, page_num, zh)
@@ -348,9 +397,15 @@ async def export_page_translation(paper_id: str, page_num: int, payload: dict):
             ai = None
             for row in rows:
                 pnum = int(row["page_num"])
-                status, _ = db.get_page_translation(paper_id, pnum)
-                if status == "done":
+                status, translations = db.get_page_translation(paper_id, pnum)
+                pblocks = db.load_page_blocks(paper_id, pnum) or []
+                if status == "done" and not _untranslated_blocks(pblocks, translations):
                     continue
+                if status == "done":
+                    # Earlier runs accepted padded replies, so a page can be
+                    # marked done with English blocks still in it. Redo it.
+                    log.warning("page %s is done but incomplete; retranslating", pnum)
+                    db.init_page_translation(paper_id, pnum)
                 if ai is None:
                     ai = ai_client.AIClient()
                 async for _ in _translate_page_events(paper_id, pnum, ai):
@@ -367,8 +422,12 @@ async def export_page_translation(paper_id: str, page_num: int, payload: dict):
         pnum = int(row["page_num"])
         pblocks = db.load_page_blocks(paper_id, pnum) or []
         status, ptranslations = db.get_page_translation(paper_id, pnum)
-        if mode == "full" and status != "done":
-            raise HTTPException(502, f"Page {pnum} has no completed translation")
+        if mode == "full":
+            if status != "done":
+                raise HTTPException(502, f"Page {pnum} has no completed translation")
+            missing = _untranslated_blocks(pblocks, ptranslations)
+            if missing:
+                raise HTTPException(502, f"Page {pnum} still has {len(missing)} untranslated block(s)")
         if mode == "full" or any((item or "").strip() for item in ptranslations):
             translated_pages.append((pnum, pblocks, ptranslations))
     if not translated_pages:

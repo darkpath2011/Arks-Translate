@@ -22,6 +22,17 @@ import pymupdf
 
 import db
 
+
+def block_text(block: dict) -> str:
+    """The source text of a block, whichever shape it was stored in."""
+    return (block.get("text") or " ".join(block.get("sents", []))).strip()
+
+
+def needs_translation(block: dict) -> bool:
+    """Whether a block carries source text that a translation must cover."""
+    return block.get("kind") != "figure" and bool(block_text(block))
+
+
 SECTION_NAMES = {
     "abstract", "introduction", "background",
     "method", "methods", "methodology",
