@@ -90,7 +90,16 @@ function bindUI() {
     menu.hidden = !menu.hidden;
   });
   $("#export-partial-btn").addEventListener("click", () => { $("#export-menu").hidden = true; exportCurrentPage("partial", $("#export-partial-btn")); });
-  $("#export-full-btn").addEventListener("click", () => { $("#export-menu").hidden = true; exportCurrentPage("full", $("#export-full-btn")); });
+  $("#export-full-btn").addEventListener("click", () => { $("#export-menu").hidden = true; openExportDialog(); });
+  $("#export-cancel").addEventListener("click", closeExportDialog);
+  $("#export-dialog").addEventListener("click", (e) => {
+    if (e.target === $("#export-dialog")) closeExportDialog();
+  });
+  $("#export-confirm").addEventListener("click", () => {
+    const skip = readSkippedSections();
+    closeExportDialog();
+    exportCurrentPage("full", $("#export-full-btn"), skip);
+  });
   $("#zoom-out").addEventListener("click", () => setZoom(state.zoom - 0.1));
   $("#zoom-in").addEventListener("click", () => setZoom(state.zoom + 0.1));
   $("#zoom-reset").addEventListener("click", () => setZoom(1));
@@ -100,7 +109,7 @@ function bindUI() {
     if (e.target.matches("input,textarea")) return;
     if (e.key === "ArrowLeft") gotoPage(state.pageNum - 1);
     if (e.key === "ArrowRight") gotoPage(state.pageNum + 1);
-    if (e.key === "Escape") closePopover();
+    if (e.key === "Escape") { closeExportDialog(); closePopover(); }
   });
   document.addEventListener("click", (e) => {
     if (!e.target.closest(".export-menu-wrap")) $("#export-menu").hidden = true;
@@ -762,16 +771,18 @@ async function startTranslationStream() {
   }
 }
 
-async function exportCurrentPage(mode, button) {
+async function exportCurrentPage(mode, button, skipSections) {
   if (!state.page) return;
   const label = button.textContent;
   button.disabled = true;
   button.textContent = mode === "full" ? "正在翻译整份 PDF 并导出…" : "正在导出…";
   try {
+    const body = { mode };
+    if (skipSections) body.skip_sections = skipSections;
     const res = await fetch(`/api/papers/${state.paper.id}/page/${state.pageNum}/export`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ mode }),
+      body: JSON.stringify(body),
     });
     if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || "Export failed");
     const blob = await res.blob();
@@ -789,6 +800,51 @@ async function exportCurrentPage(mode, button) {
     button.disabled = false;
     button.textContent = label;
   }
+}
+
+// ---- Export dialog -------------------------------------------------------
+
+function openExportDialog() {
+  const sections = (state.paper && state.paper.sections) || [];
+  if (!sections.length) {
+    // Nothing was detected to choose between, so skip straight to the export.
+    exportCurrentPage("full", $("#export-full-btn"));
+    return;
+  }
+  const list = $("#export-sections");
+  list.innerHTML = "";
+  for (const s of sections) {
+    const row = document.createElement("label");
+    row.className = "section-row";
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.checked = s.translate !== false;
+    box.dataset.sectionId = s.id;
+    const name = document.createElement("span");
+    name.className = "section-name";
+    name.textContent = s.title;
+    name.title = s.title;
+    const pages = document.createElement("span");
+    pages.className = "section-pages";
+    pages.textContent = s.start_page === s.end_page ? `p${s.start_page}` : `p${s.start_page}-${s.end_page}`;
+    row.append(box, name, pages);
+    list.appendChild(row);
+  }
+  $("#export-dialog").hidden = false;
+}
+
+function closeExportDialog() {
+  $("#export-dialog").hidden = true;
+}
+
+function readSkippedSections() {
+  const skipped = [];
+  for (const box of $("#export-sections").querySelectorAll("input[type=checkbox]")) {
+    if (!box.checked) skipped.push(Number(box.dataset.sectionId));
+    const section = state.paper.sections.find((s) => s.id === Number(box.dataset.sectionId));
+    if (section) section.translate = box.checked;
+  }
+  return skipped;
 }
 
 // ---- Section hint --------------------------------------------------------

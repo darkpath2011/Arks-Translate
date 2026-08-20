@@ -45,6 +45,19 @@ def get_conn() -> sqlite3.Connection:
                         _conn.execute(f"ALTER TABLE words ADD COLUMN {column} {kind}")
                     except sqlite3.OperationalError:
                         pass
+                # Forward-compatible migration for databases created before
+                # sections could be excluded from translation. Back matter
+                # starts excluded, matching pdf_extract.DEFAULT_SKIP_SECTIONS.
+                try:
+                    _conn.execute("ALTER TABLE sections ADD COLUMN translate INTEGER DEFAULT 1")
+                except sqlite3.OperationalError:
+                    pass
+                else:
+                    _conn.execute(
+                        "UPDATE sections SET translate=0 WHERE lower(trim(title)) IN "
+                        "('references','bibliography','appendix','appendices',"
+                        "'acknowledgments','acknowledgements','notes','footnotes')"
+                    )
     return _conn
 
 
@@ -96,11 +109,32 @@ def load_page(paper_id: str, page_num: int) -> dict | None:
     return data
 
 
-def save_section(paper_id: str, section_id: int, title: str, start_page: int, end_page: int) -> None:
+def save_section(
+    paper_id: str,
+    section_id: int,
+    title: str,
+    start_page: int,
+    end_page: int,
+    translate: bool = True,
+) -> None:
+    """Upsert a section, keeping any hint and translate choice already stored.
+
+    Re-extraction rebuilds sections, and INSERT OR REPLACE would silently throw
+    away the user's choices along with the generated hint.
+    """
     execute(
-        "INSERT OR REPLACE INTO sections(paper_id, section_id, title, start_page, end_page) "
-        "VALUES (?,?,?,?,?)",
-        (paper_id, section_id, title, start_page, end_page),
+        "INSERT INTO sections(paper_id, section_id, title, start_page, end_page, translate) "
+        "VALUES (?,?,?,?,?,?) "
+        "ON CONFLICT(paper_id, section_id) DO UPDATE SET "
+        "title=excluded.title, start_page=excluded.start_page, end_page=excluded.end_page",
+        (paper_id, section_id, title, start_page, end_page, 1 if translate else 0),
+    )
+
+
+def set_section_translate(paper_id: str, section_id: int, translate: bool) -> None:
+    execute(
+        "UPDATE sections SET translate=? WHERE paper_id=? AND section_id=?",
+        (1 if translate else 0, paper_id, section_id),
     )
 
 
@@ -135,6 +169,14 @@ def init_page_translation(paper_id: str, page_num: int) -> None:
         "VALUES (?,?,?,?,?) "
         "ON CONFLICT(paper_id, page_num) DO UPDATE SET status=excluded.status, zh_json=excluded.zh_json, updated_at=excluded.updated_at",
         (paper_id, page_num, "streaming", "[]", now()),
+    )
+
+
+def clear_page_translation(paper_id: str, page_num: int) -> None:
+    """Drop a page's translation entirely, back to the 'none' status."""
+    execute(
+        "DELETE FROM page_translations WHERE paper_id=? AND page_num=?",
+        (paper_id, page_num),
     )
 
 

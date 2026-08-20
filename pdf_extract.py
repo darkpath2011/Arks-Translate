@@ -22,6 +22,11 @@ import pymupdf
 
 import db
 
+# Bumped whenever extraction changes the text or coordinates it produces, so
+# that already-imported papers are rebuilt on next open. 3 restores words that
+# a line break split with a hyphen.
+COORDINATE_VERSION = 3
+
 
 def block_text(block: dict) -> str:
     """The source text of a block, whichever shape it was stored in."""
@@ -31,6 +36,42 @@ def block_text(block: dict) -> str:
 def needs_translation(block: dict) -> bool:
     """Whether a block carries source text that a translation must cover."""
     return block.get("kind") != "figure" and bool(block_text(block))
+
+
+# Prefixes that keep their hyphen when a word breaks across lines, so that
+# "self-" + "report" stays "self-report" rather than becoming "selfreport".
+HYPHEN_PREFIXES = (
+    "self", "non", "pre", "post", "anti", "multi", "inter", "intra",
+    "sub", "co", "re", "semi", "pseudo", "quasi", "cross", "well",
+)
+_LINE_BREAK_HYPHEN = re.compile(r"(\w+)[-‐­]$")
+
+
+def join_lines(lines: list[str]) -> str:
+    """Join physical PDF lines, repairing words the layout broke with a hyphen.
+
+    English wraps mid-word at a line end; joining on whitespace would leave
+    "im- plications" for the translator to choke on.
+    """
+    out = ""
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        if not out:
+            out = line
+            continue
+        broken = _LINE_BREAK_HYPHEN.search(out)
+        if broken:
+            # A hyphen glued to a word is a line break, never a dash, so the
+            # halves always join up. "im-" + "plications" drops the hyphen;
+            # "self-" + "report" and "1-" + "A" keep it.
+            if broken.group(1).lower() not in HYPHEN_PREFIXES and line[:1].islower():
+                out = out[:-1]
+            out += line
+            continue
+        out += " " + line
+    return out
 
 
 SECTION_NAMES = {
@@ -43,6 +84,18 @@ SECTION_NAMES = {
     "references", "appendix",
     "acknowledgments", "acknowledgements",
 }
+
+# Sections that start out excluded from translation: back matter where the
+# Chinese is less useful than the original names, titles and numbers.
+DEFAULT_SKIP_SECTIONS = {
+    "references", "bibliography", "appendix", "appendices",
+    "acknowledgments", "acknowledgements", "notes", "footnotes",
+}
+
+
+def skipped_by_default(title: str) -> bool:
+    return title.strip().rstrip(":").strip().lower() in DEFAULT_SKIP_SECTIONS
+
 
 SKIP_HEADING_RE = re.compile(
     r"^(?:journal|volume|vol\.?|copyright|©|\d{4}.*vol|page \d+|pp\.? \d+|doi:)",
@@ -234,7 +287,7 @@ def _extract_page_ir(page: pymupdf.Page, page_num: int, image_path: str | None =
                 if not st.strip(): continue
                 sizes.append(float(sp.get("size", 10)))
         if lines:
-            candidates.append({"raw": rb, "lines": lines, "words": words, "text": " ".join(x["text"] for x in lines), "bbox": _bbox_union([x["bbox"] for x in lines]), "size": max((sp.get("size",10) for ln in rb["lines"] for sp in ln.get("spans", [])), default=10)})
+            candidates.append({"raw": rb, "lines": lines, "words": words, "text": join_lines([x["text"] for x in lines]), "bbox": _bbox_union([x["bbox"] for x in lines]), "size": max((sp.get("size",10) for ln in rb["lines"] for sp in ln.get("spans", [])), default=10)})
     median = sorted(sizes)[len(sizes)//2] if sizes else 10
     page_h = float(page.rect.height); page_w = float(page.rect.width)
     candidates.sort(key=lambda c: (c["bbox"][1], c["bbox"][0]))
@@ -258,7 +311,7 @@ def _extract_page_ir(page: pymupdf.Page, page_num: int, image_path: str | None =
             for w in sw:
                 word_boxes.append({"text":w["text"],"bbox":w["bbox"],"x":w["bbox"][0],"y":w["bbox"][1],"w":w["bbox"][2]-w["bbox"][0],"h":w["bbox"][3]-w["bbox"][1],"sent_id":sid,"lemma":re.sub(r"[^A-Za-z']", "", w["text"].lower())})
         blocks.append({"id":f"p{page_num}-b{idx}","kind":kind,"type":kind,"bbox":c["bbox"],"reading_order":idx,"text":text,"lines":c["lines"],"sentences":sent_objs,"style":{"font_size":round(c["size"],2),"bold":c["size"]>=median*1.2},"children":[]})
-    return blocks, {"coordinate_version": 2, "page_num":page_num,"page_w":page_w,"page_h":page_h,"image_path":image_path,"image_w":page_w,"image_h":page_h,"word_boxes":word_boxes,"sentences":sentences,"blocks":blocks}
+    return blocks, {"coordinate_version": COORDINATE_VERSION, "page_num":page_num,"page_w":page_w,"page_h":page_h,"image_path":image_path,"image_w":page_w,"image_h":page_h,"word_boxes":word_boxes,"sentences":sentences,"blocks":blocks}
 
 
 def _build_blocks_for_page(page: pymupdf.Page) -> list[dict]:
@@ -274,7 +327,7 @@ def _build_blocks_for_page(page: pymupdf.Page) -> list[dict]:
     def flush_paragraph():
         nonlocal current_para_lines
         if current_para_lines:
-            text = " ".join(current_para_lines)
+            text = join_lines(current_para_lines)
             text = re.sub(r"\s+", " ", text).strip()
             if text:
                 sents = _split_sentences(text)
@@ -336,6 +389,29 @@ def _build_blocks_for_page(page: pymupdf.Page) -> list[dict]:
     return blocks
 
 
+def section_block_ranges(paper_id: str) -> dict[int, set[tuple[int, int]]]:
+    """Map each section id to the (page, block index) pairs it covers.
+
+    The sections table only records page ranges, which is too coarse — a
+    section usually starts partway down a page. Sections are numbered in the
+    order their heading blocks appear (see extract_pdf), so walking the blocks
+    in reading order rebuilds the exact boundaries. Blocks before the first
+    heading (title, authors, abstract) belong to no section.
+    """
+    ranges: dict[int, set[tuple[int, int]]] = {}
+    section_id = -1
+    for row in db.query(
+        "SELECT page_num FROM pages WHERE paper_id=? ORDER BY page_num", (paper_id,)
+    ):
+        page_num = int(row["page_num"])
+        for index, block in enumerate(db.load_page_blocks(paper_id, page_num) or []):
+            if block.get("kind") in {"h2", "heading"} and len(block_text(block)) >= 3:
+                section_id += 1
+            if section_id >= 0:
+                ranges.setdefault(section_id, set()).add((page_num, index))
+    return ranges
+
+
 def extract_pdf(pdf_path: Path) -> str:
     paper_id = _paper_id(pdf_path)
     doc = pymupdf.open(pdf_path)
@@ -382,7 +458,7 @@ def extract_pdf(pdf_path: Path) -> str:
     sections = [s for s in sections if len(s[2]) >= 3]
 
     for idx, (start, end, title) in enumerate(sections):
-        db.save_section(paper_id, idx, title, start, end)
+        db.save_section(paper_id, idx, title, start, end, translate=not skipped_by_default(title))
 
     doc.close()
     return paper_id

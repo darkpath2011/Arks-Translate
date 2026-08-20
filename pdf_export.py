@@ -35,14 +35,16 @@ class Placement(NamedTuple):
     text: str
     size: int
     lineheight: float
+    slack: float
     fontname: str
     is_source: bool
 
 
 def _fit(
     ruler: pymupdf.Page, rect: pymupdf.Rect, text: str, base_size: float, fontname: str
-) -> tuple[int, float] | None:
-    """Largest legible size and spacing that fit text in rect, or None.
+) -> tuple[int, float, float] | None:
+    """Largest legible size and spacing that fit text in rect, plus the height
+    left over, or None if the text never fits.
 
     Measured by trial insertion on a throwaway page so the answer matches what
     the real page will do. Blocks must be sized before anything is erased:
@@ -55,7 +57,7 @@ def _fit(
                 rect, text, fontname=fontname, fontsize=size, lineheight=lineheight
             )
             if remaining >= 0:
-                return size, lineheight
+                return size, lineheight, remaining
     return None
 
 
@@ -179,8 +181,10 @@ def export_translated_pages(
 
             page.insert_font(fontname=CJK_FONT, fontfile=str(CHINESE_FONT))
             for placement in placements:
+                # Chinese needs fewer lines than the English it replaces, which
+                # would leave the text stranded at the top of a part-empty box.
                 page.insert_textbox(
-                    placement.rect,
+                    placement.rect + (0, placement.slack / 2, 0, 0),
                     placement.text,
                     fontname=placement.fontname,
                     fontsize=placement.size,

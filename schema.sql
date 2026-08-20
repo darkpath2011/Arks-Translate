@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS sections (
     end_page    INTEGER,
     hint_zh     TEXT,
     hint_status TEXT DEFAULT 'none',
+    translate   INTEGER DEFAULT 1,
     PRIMARY KEY (paper_id, section_id)
 );
 

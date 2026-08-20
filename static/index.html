@@ -64,6 +64,18 @@
 
   <div id="popover-root"></div>
 
+  <div id="export-dialog" class="modal-backdrop" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="export-dialog-title">
+      <h2 id="export-dialog-title" class="modal-title">导出整份 PDF</h2>
+      <p class="modal-hint">选择要翻译的章节，未勾选的部分保留英文原文。</p>
+      <div id="export-sections" class="section-picker"></div>
+      <div class="modal-actions">
+        <button id="export-cancel" class="ghostbtn">取消</button>
+        <button id="export-confirm" class="ghostbtn primary">开始导出</button>
+      </div>
+    </div>
+  </div>
+
   <script src="/static/app.js"></script>
 </body>
 </html>
