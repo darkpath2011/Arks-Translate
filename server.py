@@ -102,6 +102,17 @@ def _json_text(value: object) -> str:
     return value.strip() if isinstance(value, str) else ""
 
 
+def _is_part_of_speech_only(value: str) -> bool:
+    """Reject a POS label accidentally returned in place of a Chinese meaning."""
+    compact = re.sub(r"[()（）,，;；/\\s]+", "", value.lower())
+    pos_words = (
+        "名词", "动词", "形容词", "副词", "介词", "连词", "代词", "冠词",
+        "数词", "感叹词", "noun", "verb", "adjective", "adverb", "preposition",
+        "conjunction", "pronoun", "article", "numeral", "interjection",
+    )
+    return bool(compact) and all(part in "".join(pos_words) for part in re.findall(r"[a-z]+|[\u3400-\u9fff]+", compact))
+
+
 # ---- Static & root --------------------------------------------------------
 
 
@@ -322,7 +333,7 @@ async def translate_page(paper_id: str, page_num: int):
 
 @app.post("/api/papers/{paper_id}/page/{page_num}/export")
 async def export_page_translation(paper_id: str, page_num: int, payload: dict):
-    """Download the current page with saved Chinese translations overlaid."""
+    """Download saved pages, or translate and export the complete source PDF."""
     mode = payload.get("mode", "partial")
     if mode not in {"partial", "full"}:
         raise HTTPException(400, "mode must be partial or full")
@@ -331,40 +342,42 @@ async def export_page_translation(paper_id: str, page_num: int, payload: dict):
     if paper is None or blocks is None:
         raise HTTPException(404, "Paper page not found")
 
-    status, translations = db.get_page_translation(paper_id, page_num)
-    if mode == "full" and status != "done":
+    rows = db.query("SELECT page_num FROM pages WHERE paper_id=? ORDER BY page_num", (paper_id,))
+    if mode == "full":
         try:
-            ai = ai_client.AIClient()
-            async for _ in _translate_page_events(paper_id, page_num, ai):
-                pass
+            ai = None
+            for row in rows:
+                pnum = int(row["page_num"])
+                status, _ = db.get_page_translation(paper_id, pnum)
+                if status == "done":
+                    continue
+                if ai is None:
+                    ai = ai_client.AIClient()
+                async for _ in _translate_page_events(paper_id, pnum, ai):
+                    pass
+                status, _ = db.get_page_translation(paper_id, pnum)
+                if status != "done":
+                    raise RuntimeError(f"page {pnum} could not finish translation")
         except Exception as e:
-            log.exception("export translation failed")
-            raise HTTPException(502, f"Could not finish translation: {e}") from e
-        status, translations = db.get_page_translation(paper_id, page_num)
-        if status != "done":
-            raise HTTPException(502, "Could not finish translation before export")
+            log.exception("full-PDF export translation failed")
+            raise HTTPException(502, f"Could not finish full PDF translation: {e}") from e
 
-    if mode == "partial":
-        translated_pages = []
-        rows = db.query("SELECT page_num FROM pages WHERE paper_id=? ORDER BY page_num", (paper_id,))
-        for row in rows:
-            pnum = int(row["page_num"])
-            pblocks = db.load_page_blocks(paper_id, pnum) or []
-            _, ptranslations = db.get_page_translation(paper_id, pnum)
-            if any((item or "").strip() for item in ptranslations):
-                translated_pages.append((pnum, pblocks, ptranslations))
-        if not translated_pages:
-            raise HTTPException(409, "No translated pages are available")
-        output_path = BASE_DIR / "output" / "pdf" / f"{paper_id}-translated-pages.pdf"
-    else:
-        if not any((item or "").strip() for item in translations):
-            raise HTTPException(409, "No translated content is available on this page")
-        output_path = BASE_DIR / "output" / "pdf" / f"{paper_id}-page-{page_num}-full.pdf"
+    translated_pages = []
+    for row in rows:
+        pnum = int(row["page_num"])
+        pblocks = db.load_page_blocks(paper_id, pnum) or []
+        status, ptranslations = db.get_page_translation(paper_id, pnum)
+        if mode == "full" and status != "done":
+            raise HTTPException(502, f"Page {pnum} has no completed translation")
+        if mode == "full" or any((item or "").strip() for item in ptranslations):
+            translated_pages.append((pnum, pblocks, ptranslations))
+    if not translated_pages:
+        raise HTTPException(409, "No translated pages are available")
+    output_path = BASE_DIR / "output" / "pdf" / (
+        f"{paper_id}-full-translated.pdf" if mode == "full" else f"{paper_id}-translated-pages.pdf"
+    )
     try:
-        if mode == "partial":
-            pdf_export.export_translated_pages(Path(paper["source_path"]), translated_pages, output_path)
-        else:
-            pdf_export.export_translated_page(Path(paper["source_path"]), page_num, blocks, translations, output_path)
+        pdf_export.export_translated_pages(Path(paper["source_path"]), translated_pages, output_path)
     except Exception as e:
         log.exception("PDF export failed")
         raise HTTPException(500, f"PDF export failed: {e}") from e
@@ -444,7 +457,7 @@ async def section_hint(paper_id: str, section_id: int):
 
 async def _word_lookup_events(word: str, sentence: str, ai: ai_client.AIClient):
     cached = db.get_word_definition(word.lower())
-    if cached and cached["zh"] and cached["en_simple"] and cached["pronunciation"] and cached["part_of_speech"]:
+    if cached and cached["zh"] and not _is_part_of_speech_only(cached["zh"]) and cached["en_simple"] and cached["pronunciation"] and cached["part_of_speech"]:
         yield {"type": "replay", "zh": cached["zh"], "en_simple": cached["en_simple"], "part_of_speech": cached["part_of_speech"], "pronunciation": cached["pronunciation"], "word_form": cached["word_form"] or "", "memory_tip": cached["memory_tip"] or ""}
         yield {"type": "done"}
         return
@@ -481,12 +494,40 @@ async def _word_lookup_events(word: str, sentence: str, ai: ai_client.AIClient):
             if re.search(r"[\u3400-\u9fff]", candidate):
                 zh = candidate
                 break
-    en_simple = _json_text(parsed.get("en_simple"))
-    part_of_speech = _json_text(parsed.get("part_of_speech"))
-    pronunciation = _json_text(parsed.get("pronunciation"))
-    word_form = _json_text(parsed.get("word_form"))
-    memory_tip = _json_text(parsed.get("memory_tip"))
-    if not zh:
+    if _is_part_of_speech_only(zh):
+        # Do not let a valid-looking POS tag contaminate the primary meaning.
+        # Retry once with an explicit correction before reporting a malformed reply.
+        correction = (
+            "Your previous Chinese meaning was only a part-of-speech label. "
+            "Return the actual Chinese dictionary meaning for this word, not its word class. "
+            "For example, a valid meaning is '休闲；闲暇时间', while '名词 noun' is invalid.\n\n"
+        ) + prompt
+        full = []
+        try:
+            async for chunk in ai.stream(correction, temperature=0.1, max_tokens=384):
+                full.append(chunk)
+                yield {"type": "delta", "content": chunk}
+        except Exception as e:
+            log.exception("word lookup correction failed")
+            yield {"type": "error", "message": str(e)}
+            return
+        parsed = _parse_json_object("".join(full).strip(), "word lookup correction")
+        if parsed is None:
+            yield {"type": "error", "message": "The model returned an invalid dictionary response."}
+            return
+        zh = _json_text(parsed.get("zh"))
+        en_simple = _json_text(parsed.get("en_simple"))
+        part_of_speech = _json_text(parsed.get("part_of_speech"))
+        pronunciation = _json_text(parsed.get("pronunciation"))
+        word_form = _json_text(parsed.get("word_form"))
+        memory_tip = _json_text(parsed.get("memory_tip"))
+    else:
+        en_simple = _json_text(parsed.get("en_simple"))
+        part_of_speech = _json_text(parsed.get("part_of_speech"))
+        pronunciation = _json_text(parsed.get("pronunciation"))
+        word_form = _json_text(parsed.get("word_form"))
+        memory_tip = _json_text(parsed.get("memory_tip"))
+    if not zh or _is_part_of_speech_only(zh):
         log.warning("word lookup returned no Chinese field; payload=%r", parsed)
         yield {"type": "error", "message": "The model did not return a Chinese meaning."}
         return

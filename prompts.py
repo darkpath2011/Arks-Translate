@@ -53,7 +53,7 @@ def word_lookup_prompt(word: str, sentence: str) -> str:
     return (
         "You build a useful vocabulary memory card for an English learner.\n"
         "The Chinese meaning is primary; do not only explain in English. Return JSON only with:\n"
-        ' - "zh": 1-3 short Chinese meanings, most common first\n'
+        ' - "zh": 1-3 short Chinese meanings, most common first. This must be the actual meaning, never a part-of-speech label. For example, leisure -> "休闲；闲暇时间", never "名词 noun"\n'
         ' - "part_of_speech": concise Chinese/English part of speech, e.g. "名词 noun"\n'
         ' - "en_simple": a very short plain-English explanation (<= 12 words)\n'
         ' - "pronunciation": IPA pronunciation, e.g. /ˈliːʒər/\n'

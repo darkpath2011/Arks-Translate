@@ -668,7 +668,7 @@ function renderTranslationStrip() {
   partial.addEventListener("click", () => exportCurrentPage("partial", partial));
   const full = document.createElement("button");
   full.className = "ghostbtn";
-  full.textContent = "翻译整页后导出 PDF";
+  full.textContent = "翻译整份 PDF 后导出";
   full.addEventListener("click", () => exportCurrentPage("full", full));
   exportActions.append(partial, full);
   strip.appendChild(exportActions);
@@ -766,7 +766,7 @@ async function exportCurrentPage(mode, button) {
   if (!state.page) return;
   const label = button.textContent;
   button.disabled = true;
-  button.textContent = mode === "full" ? "正在翻译并导出…" : "正在导出…";
+  button.textContent = mode === "full" ? "正在翻译整份 PDF 并导出…" : "正在导出…";
   try {
     const res = await fetch(`/api/papers/${state.paper.id}/page/${state.pageNum}/export`, {
       method: "POST",
@@ -780,7 +780,7 @@ async function exportCurrentPage(mode, button) {
     link.href = url;
     link.download = mode === "partial"
       ? `${state.paper.id}-translated-pages.pdf`
-      : `${state.paper.id}-page-${state.pageNum}-full.pdf`;
+      : `${state.paper.id}-full-translated.pdf`;
     link.click();
     URL.revokeObjectURL(url);
   } catch (e) {
