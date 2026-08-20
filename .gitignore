@@ -1,0 +1,83 @@
+# --- Secrets & local config ---
+# API keys / provider config — NEVER commit
+.arks.env
+*.env
+!.env.example
+
+# Claude Code local state
+.claude/
+
+# --- Runtime data & caches ---
+# Local cache: SQLite DB, page PNG renders, intermediate files
+.cache/
+# Uploaded PDFs (user files)
+papers/
+# Exported PDFs
+output/
+# Ad-hoc scratch space
+tmp/
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+*.manifest
+*.spec
+
+# --- Virtualenvs ---
+venv/
+.venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# --- IDE / OS ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Logs ---
+*.log
+logs/
+
+# --- Test / coverage ---
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+.hypothesis/
+
+# --- Jupyter ---
+.ipynb_checkpoints/
+
+# --- Misc ---
+*.bak
+*.tmp
+*.orig
+*.rej

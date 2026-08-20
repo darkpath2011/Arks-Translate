@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Arks · Reading</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body data-focus="off">
+  <header class="topbar">
+    <button id="toc-toggle" class="iconbtn" title="Toggle table of contents" aria-label="Toggle TOC">≡</button>
+    <div class="brand">
+      <span class="brand-name">Arks</span>
+      <span id="paper-title" class="paper-title">Loading…</span>
+    </div>
+    <div class="topbar-right">
+      <button id="translate-btn" class="ghostbtn" title="Translate this page">译文</button>
+      <div class="export-menu-wrap">
+        <button id="export-menu-btn" class="ghostbtn" title="Export PDF">导出 PDF ▾</button>
+        <div id="export-menu" class="export-menu" hidden>
+          <button id="export-partial-btn" class="export-option" disabled>导出所有已翻译页面</button>
+          <button id="export-full-btn" class="export-option">全文翻译后导出</button>
+        </div>
+      </div>
+      <div class="zoom-controls" aria-label="PDF zoom controls">
+        <button id="zoom-out" class="iconbtn" title="Zoom out" aria-label="Zoom out">−</button>
+        <button id="zoom-reset" class="zoom-value" title="Reset zoom">100%</button>
+        <button id="zoom-in" class="iconbtn" title="Zoom in" aria-label="Zoom in">+</button>
+      </div>
+      <button id="focus-btn" class="iconbtn" title="Focus mode" aria-label="Focus mode">⛶</button>
+    </div>
+  </header>
+
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-section">
+      <h3>Sections</h3>
+      <ul id="toc-list" class="toc"></ul>
+    </div>
+    <div class="sidebar-section sidebar-bottom">
+      <h3>Pages</h3>
+      <ul id="page-list" class="pages"></ul>
+    </div>
+  </aside>
+
+  <main class="reader" id="reader">
+    <div id="section-hint" class="section-hint" hidden>
+      <span class="section-hint-label"></span>
+      <span class="section-hint-body"></span>
+    </div>
+
+    <div id="page-viewport" class="page-viewport">
+      <div id="page-container" class="page-container" style="display:none">
+        <img id="page-image" class="page-image" alt="" />
+        <div id="text-overlay" class="text-overlay"></div>
+      </div>
+    </div>
+
+    <nav class="pager">
+      <button id="prev-page" class="ghostbtn">← Prev</button>
+      <span id="page-status" class="page-status">—</span>
+      <button id="next-page" class="ghostbtn">Next →</button>
+    </nav>
+  </main>
+
+  <div id="popover-root"></div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
