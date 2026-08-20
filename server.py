@@ -509,11 +509,13 @@ async def export_page_translation(paper_id: str, page_num: int, payload: dict):
         f"{paper_id}-full-translated.pdf" if mode == "full" else f"{paper_id}-translated-pages.pdf"
     )
     try:
-        pdf_export.export_translated_pages(Path(paper["source_path"]), translated_pages, output_path)
+        written = pdf_export.export_translated_pages(Path(paper["source_path"]), translated_pages, output_path)
     except Exception as e:
         log.exception("PDF export failed")
         raise HTTPException(500, f"PDF export failed: {e}") from e
-    return FileResponse(output_path, media_type="application/pdf", filename=output_path.name)
+    # written may be a staged copy if the previous export is open in a viewer,
+    # but the download keeps the stable name either way.
+    return FileResponse(written, media_type="application/pdf", filename=output_path.name)
 
 
 # ---- Section hint (SSE) ---------------------------------------------------

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 from typing import NamedTuple
 
@@ -112,6 +113,30 @@ def _place(ruler: pymupdf.Page, rect: pymupdf.Rect, block: dict, zh: str) -> Pla
     return None
 
 
+def _save(doc: pymupdf.Document, output_path: Path) -> Path:
+    """Write the PDF, tolerating a viewer holding the previous export open.
+
+    Saving replaces the target in place, which Windows refuses while the last
+    export is still open in a PDF reader. Write alongside it and swap instead,
+    and if the swap is refused too, keep the temporary file so the download
+    still succeeds. Returns the path actually written.
+    """
+    staged = output_path.with_name(f"{output_path.stem}.staged-{os.getpid()}.pdf")
+    doc.save(staged, garbage=4, deflate=True)
+    try:
+        os.replace(staged, output_path)
+    except OSError as e:
+        log.warning("%s is locked (%s); serving %s instead", output_path.name, e, staged.name)
+        return staged
+    # A previous run may have left its staged copy behind when the swap failed.
+    for old in output_path.parent.glob(f"{output_path.stem}.staged-*.pdf"):
+        try:
+            old.unlink()
+        except OSError:
+            pass
+    return output_path
+
+
 def export_translated_pages(
     source_pdf: Path,
     pages: list[tuple[int, list[dict], list[str]]],
@@ -200,8 +225,7 @@ def export_translated_pages(
         if unplaced:
             log.error("%s block(s) could not be placed at all in %s", unplaced, output_path.name)
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        output.save(output_path, garbage=4, deflate=True)
-        return output_path
+        return _save(output, output_path)
     finally:
         scratch.close()
         source.close()
